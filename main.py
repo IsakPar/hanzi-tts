@@ -24,61 +24,55 @@ from pydantic import BaseModel
 def get_api_key():
     return os.getenv("DASHSCOPE_API_KEY")
 
-# Available voices
+# Available voices - using base names without version suffix for compatibility
 VOICES = {
     "longxiaochun": {
-        "id": "longxiaochun_v2",
+        "id": "longxiaochun",
         "name": "Xiaochun",
         "gender": "female",
         "description": "Standard Mandarin female, gentle and clear",
         "language": "zh",
     },
-    "longxiaobai": {
-        "id": "longxiaobai_v2",
-        "name": "Xiaobai", 
+    "longwan": {
+        "id": "longwan",
+        "name": "Wan", 
         "gender": "female",
-        "description": "Young energetic female voice",
+        "description": "Sweet female voice",
         "language": "zh",
     },
-    "longlaotie": {
-        "id": "longlaotie_v2",
-        "name": "Laotie",
+    "longhua": {
+        "id": "longhua",
+        "name": "Hua",
         "gender": "male",
-        "description": "Mature male voice",
-        "language": "zh",
-    },
-    "longshu": {
-        "id": "longshu_v2",
-        "name": "Shu",
-        "gender": "male",
-        "description": "Professional male narrator",
+        "description": "Standard male voice",
         "language": "zh",
     },
     "longshuo": {
-        "id": "longshuo_v2",
+        "id": "longshuo",
         "name": "Shuo",
         "gender": "male", 
         "description": "Warm male voice",
         "language": "zh",
     },
-    "longjielidou": {
-        "id": "longjielidou_v2",
-        "name": "Jielidou",
+    "longyue": {
+        "id": "longyue",
+        "name": "Yue",
         "gender": "female",
-        "description": "Sweet female voice",
+        "description": "Professional female narrator",
         "language": "zh",
     },
-    "longxiaoxia": {
-        "id": "longxiaoxia_v2",
-        "name": "Xiaoxia",
+    "longjing": {
+        "id": "longjing",
+        "name": "Jing",
         "gender": "female",
-        "description": "Gentle female teacher voice",
+        "description": "Clear female voice",
         "language": "zh",
     },
 }
 
 DEFAULT_VOICE = "longxiaochun"
-MODEL = "cosyvoice-v3-plus"
+# Try different model names - international edition may differ
+MODEL = os.getenv("TTS_MODEL", "cosyvoice-v1")
 
 # ═══════════════════════════════════════════════════════════
 # FASTAPI APP
