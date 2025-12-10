@@ -19,8 +19,9 @@ from dashscope.audio.tts_v2 import SpeechSynthesizer
 # CONFIGURATION
 # ═══════════════════════════════════════════════════════════
 
-# API Key from environment
-dashscope.api_key = os.getenv("DASHSCOPE_API_KEY")
+# API Key - read at request time to ensure env var is available
+def get_api_key():
+    return os.getenv("DASHSCOPE_API_KEY")
 
 # Available voices
 VOICES = {
@@ -146,7 +147,7 @@ async def health_check():
     """Health check endpoint"""
     return HealthResponse(
         status="ok",
-        configured=bool(dashscope.api_key),
+        configured=bool(get_api_key()),
         model=MODEL,
         voiceCount=len(VOICES),
     )
@@ -176,8 +177,12 @@ async def synthesize(request: SynthesizeRequest):
     For single/double character words, you can provide pinyin hint
     to ensure correct pronunciation.
     """
-    if not dashscope.api_key:
+    api_key = get_api_key()
+    if not api_key:
         raise HTTPException(status_code=500, detail="DashScope API key not configured")
+    
+    # Set the API key for this request
+    dashscope.api_key = api_key
     
     if not request.text or not request.text.strip():
         raise HTTPException(status_code=400, detail="Text is required")
@@ -236,8 +241,11 @@ async def synthesize_batch(texts: list[str], voice: Optional[str] = DEFAULT_VOIC
     Synthesize multiple texts in batch.
     Returns list of audio base64 strings.
     """
-    if not dashscope.api_key:
+    api_key = get_api_key()
+    if not api_key:
         raise HTTPException(status_code=500, detail="DashScope API key not configured")
+    
+    dashscope.api_key = api_key
     
     results = []
     for text in texts:
