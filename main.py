@@ -71,8 +71,8 @@ VOICES = {
 }
 
 DEFAULT_VOICE = "longxiaochun"
-# Try different model names - international edition may differ
-MODEL = os.getenv("TTS_MODEL", "cosyvoice-v1")
+# Model name - can be overridden via env var if needed
+MODEL = os.getenv("TTS_MODEL", "cosyvoice")
 
 # ═══════════════════════════════════════════════════════════
 # FASTAPI APP
