@@ -3,17 +3,18 @@ HanziMaster TTS Service
 
 A lightweight microservice for Chinese text-to-speech using Alibaba's DashScope CosyVoice API.
 Optimized for accurate pronunciation of single and double character words.
+
+Uses HTTP API instead of WebSocket for better compatibility with serverless platforms.
 """
 
 import os
 import base64
 import time
+import httpx
 from typing import Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import dashscope
-from dashscope.audio.tts_v2 import SpeechSynthesizer
 
 # ═══════════════════════════════════════════════════════════
 # CONFIGURATION
@@ -172,7 +173,7 @@ async def get_voices():
 @app.post("/synthesize", response_model=SynthesizeResponse)
 async def synthesize(request: SynthesizeRequest):
     """
-    Synthesize speech from Chinese text.
+    Synthesize speech from Chinese text using HTTP API.
     
     For single/double character words, you can provide pinyin hint
     to ensure correct pronunciation.
@@ -180,9 +181,6 @@ async def synthesize(request: SynthesizeRequest):
     api_key = get_api_key()
     if not api_key:
         raise HTTPException(status_code=500, detail="DashScope API key not configured")
-    
-    # Set the API key for this request
-    dashscope.api_key = api_key
     
     if not request.text or not request.text.strip():
         raise HTTPException(status_code=400, detail="Text is required")
@@ -195,32 +193,63 @@ async def synthesize(request: SynthesizeRequest):
     voice_id = VOICES[voice_key]["id"]
     text = request.text.strip()
     
-    # For short words with pinyin, we can use SSML or special formatting
-    # CosyVoice may support pronunciation hints - test this
+    # For short words with pinyin, add context to help pronunciation
     synthesis_text = text
     if request.pinyin and len(text) <= 2:
-        # Try adding pinyin context to help with pronunciation
-        # Format: "谢(xiè)" - the model might use this as a hint
+        # Format: "谢(xiè)" - helps model with correct tone
         synthesis_text = f"{text}({request.pinyin})"
     
     try:
         start_time = time.time()
         
-        # Create synthesizer
-        synthesizer = SpeechSynthesizer(model=MODEL, voice=voice_id)
-        
-        # Generate audio
-        audio_bytes = synthesizer.call(synthesis_text)
+        # Use DashScope HTTP API directly
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                "https://dashscope.aliyuncs.com/api/v1/services/aigc/text2audio/text-synthesize",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                    "X-DashScope-Async": "disable",  # Synchronous mode
+                },
+                json={
+                    "model": MODEL,
+                    "input": {
+                        "text": synthesis_text,
+                    },
+                    "parameters": {
+                        "voice": voice_id,
+                        "format": "mp3",
+                        "sample_rate": 22050,
+                    },
+                },
+            )
         
         end_time = time.time()
         latency_ms = int((end_time - start_time) * 1000)
         
-        # Get first packet latency for debugging
-        first_packet_latency = synthesizer.get_first_package_delay()
-        print(f"[TTS] Text: '{text}', Voice: {voice_key}, Latency: {latency_ms}ms, First packet: {first_packet_latency}ms")
+        if response.status_code != 200:
+            error_detail = response.text
+            print(f"[TTS] API Error: {response.status_code} - {error_detail}")
+            raise HTTPException(status_code=500, detail=f"DashScope API error: {error_detail}")
         
-        # Encode to base64
-        audio_base64 = base64.b64encode(audio_bytes).decode("utf-8")
+        result = response.json()
+        print(f"[TTS] Response keys: {result.keys()}")
+        
+        # Check for audio in response
+        if "output" in result and "audio" in result["output"]:
+            # Audio is returned as base64 in the response
+            audio_base64 = result["output"]["audio"]
+        elif "output" in result and "audio_url" in result["output"]:
+            # Audio is returned as URL - need to download
+            audio_url = result["output"]["audio_url"]
+            async with httpx.AsyncClient() as client:
+                audio_response = await client.get(audio_url)
+                audio_base64 = base64.b64encode(audio_response.content).decode("utf-8")
+        else:
+            print(f"[TTS] Unexpected response format: {result}")
+            raise HTTPException(status_code=500, detail="Unexpected API response format")
+        
+        print(f"[TTS] Text: '{text}', Voice: {voice_key}, Latency: {latency_ms}ms")
         
         return SynthesizeResponse(
             audioBase64=audio_base64,
@@ -230,6 +259,8 @@ async def synthesize(request: SynthesizeRequest):
             latencyMs=latency_ms,
         )
         
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="Request timed out")
     except Exception as e:
         print(f"[TTS] Error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Synthesis failed: {str(e)}")
@@ -244,8 +275,6 @@ async def synthesize_batch(texts: list[str], voice: Optional[str] = DEFAULT_VOIC
     api_key = get_api_key()
     if not api_key:
         raise HTTPException(status_code=500, detail="DashScope API key not configured")
-    
-    dashscope.api_key = api_key
     
     results = []
     for text in texts:
