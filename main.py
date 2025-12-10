@@ -202,10 +202,12 @@ async def synthesize(request: SynthesizeRequest):
     try:
         start_time = time.time()
         
-        # Use DashScope HTTP API directly
+        # Use DashScope HTTP API - International Edition endpoint
+        api_url = os.getenv("DASHSCOPE_API_URL", "https://dashscope-intl.aliyuncs.com/api/v1/services/aigc/text2audio/text-synthesize")
+        
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
-                "https://dashscope.aliyuncs.com/api/v1/services/aigc/text2audio/text-synthesize",
+                api_url,
                 headers={
                     "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
