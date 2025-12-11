@@ -1,78 +1,77 @@
 """
 HanziMaster TTS Service
 
-A lightweight microservice for Chinese text-to-speech using Alibaba's DashScope CosyVoice API.
-Optimized for accurate pronunciation of single and double character words.
-
-Uses HTTP API instead of WebSocket for better compatibility with serverless platforms.
+Azure-based text-to-speech for Chinese words with SSML phoneme control.
+Guarantees correct tone pronunciation for single characters.
 """
 
 import os
 import base64
 import time
-import httpx
 from typing import Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+import azure.cognitiveservices.speech as speechsdk
 
 # ═══════════════════════════════════════════════════════════
 # CONFIGURATION
 # ═══════════════════════════════════════════════════════════
 
-# API Key - read at request time to ensure env var is available
-def get_api_key():
-    return os.getenv("DASHSCOPE_API_KEY")
+def get_speech_config():
+    """Get Azure Speech config from environment."""
+    key = os.getenv("AZURE_SPEECH_KEY")
+    region = os.getenv("AZURE_SPEECH_REGION", "germanywestcentral")
+    
+    if not key:
+        return None
+    
+    config = speechsdk.SpeechConfig(subscription=key, region=region)
+    config.set_speech_synthesis_output_format(
+        speechsdk.SpeechSynthesisOutputFormat.Audio16Khz32KBitRateMonoMp3
+    )
+    return config
 
-# Available voices - using base names without version suffix for compatibility
+# Available voices
 VOICES = {
-    "longxiaochun": {
-        "id": "longxiaochun",
-        "name": "Xiaochun",
+    "xiaoxiao": {
+        "id": "zh-CN-XiaoxiaoNeural",
+        "name": "Xiaoxiao",
         "gender": "female",
-        "description": "Standard Mandarin female, gentle and clear",
-        "language": "zh",
+        "description": "Young female, natural and clear",
+        "language": "zh-CN",
     },
-    "longwan": {
-        "id": "longwan",
-        "name": "Wan", 
+    "xiaoyi": {
+        "id": "zh-CN-XiaoyiNeural",
+        "name": "Xiaoyi",
         "gender": "female",
-        "description": "Sweet female voice",
-        "language": "zh",
+        "description": "Warm female voice",
+        "language": "zh-CN",
     },
-    "longhua": {
-        "id": "longhua",
-        "name": "Hua",
+    "yunxi": {
+        "id": "zh-CN-YunxiNeural",
+        "name": "Yunxi",
         "gender": "male",
-        "description": "Standard male voice",
-        "language": "zh",
+        "description": "Young male voice",
+        "language": "zh-CN",
     },
-    "longshuo": {
-        "id": "longshuo",
-        "name": "Shuo",
-        "gender": "male", 
-        "description": "Warm male voice",
-        "language": "zh",
+    "yunyang": {
+        "id": "zh-CN-YunyangNeural",
+        "name": "Yunyang",
+        "gender": "male",
+        "description": "Professional male narrator",
+        "language": "zh-CN",
     },
-    "longyue": {
-        "id": "longyue",
-        "name": "Yue",
+    "xiaomo": {
+        "id": "zh-CN-XiaomoNeural",
+        "name": "Xiaomo",
         "gender": "female",
-        "description": "Professional female narrator",
-        "language": "zh",
-    },
-    "longjing": {
-        "id": "longjing",
-        "name": "Jing",
-        "gender": "female",
-        "description": "Clear female voice",
-        "language": "zh",
+        "description": "Gentle female voice",
+        "language": "zh-CN",
     },
 }
 
-DEFAULT_VOICE = "longxiaochun"
-# Model name - can be overridden via env var if needed
-MODEL = os.getenv("TTS_MODEL", "cosyvoice")
+DEFAULT_VOICE = "xiaoxiao"
 
 # ═══════════════════════════════════════════════════════════
 # FASTAPI APP
@@ -80,14 +79,13 @@ MODEL = os.getenv("TTS_MODEL", "cosyvoice")
 
 app = FastAPI(
     title="HanziMaster TTS Service",
-    description="Chinese text-to-speech using DashScope CosyVoice",
-    version="1.0.0",
+    description="Azure-based Chinese TTS with phoneme control",
+    version="2.0.0",
 )
 
-# CORS - allow calls from backend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Restrict in production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -101,8 +99,7 @@ class SynthesizeRequest(BaseModel):
     """Request to synthesize speech"""
     text: str
     voice: Optional[str] = DEFAULT_VOICE
-    # Optional pinyin hint for disambiguation
-    pinyin: Optional[str] = None
+    pinyin: Optional[str] = None  # e.g., "xiè" or "xie4"
 
 
 class SynthesizeResponse(BaseModel):
@@ -113,6 +110,7 @@ class SynthesizeResponse(BaseModel):
     charactersUsed: int
     voice: str
     latencyMs: int
+    usedPhoneme: bool = False
 
 
 class VoiceInfo(BaseModel):
@@ -129,8 +127,83 @@ class HealthResponse(BaseModel):
     """Health check response"""
     status: str
     configured: bool
-    model: str
+    provider: str
+    region: str
     voiceCount: int
+
+
+# ═══════════════════════════════════════════════════════════
+# PINYIN TO PHONEME CONVERSION
+# ═══════════════════════════════════════════════════════════
+
+def pinyin_to_sapi(pinyin: str) -> str:
+    """
+    Convert pinyin (with tone mark or number) to SAPI phoneme format.
+    
+    Examples:
+        "xiè" -> "xie4"
+        "xie4" -> "xie4"  
+        "nǐ hǎo" -> "ni3 hao3"
+    """
+    if not pinyin:
+        return ""
+    
+    # Tone mark to number mapping
+    tone_marks = {
+        'ā': ('a', '1'), 'á': ('a', '2'), 'ǎ': ('a', '3'), 'à': ('a', '4'),
+        'ē': ('e', '1'), 'é': ('e', '2'), 'ě': ('e', '3'), 'è': ('e', '4'),
+        'ī': ('i', '1'), 'í': ('i', '2'), 'ǐ': ('i', '3'), 'ì': ('i', '4'),
+        'ō': ('o', '1'), 'ó': ('o', '2'), 'ǒ': ('o', '3'), 'ò': ('o', '4'),
+        'ū': ('u', '1'), 'ú': ('u', '2'), 'ǔ': ('u', '3'), 'ù': ('u', '4'),
+        'ǖ': ('v', '1'), 'ǘ': ('v', '2'), 'ǚ': ('v', '3'), 'ǜ': ('v', '4'),
+        'ü': ('v', '5'),  # Neutral ü
+    }
+    
+    result = []
+    current_syllable = ""
+    tone = ""
+    
+    for char in pinyin.lower():
+        if char in tone_marks:
+            base, t = tone_marks[char]
+            current_syllable += base
+            tone = t
+        elif char == ' ':
+            if current_syllable:
+                result.append(current_syllable + tone)
+                current_syllable = ""
+                tone = ""
+        elif char.isalpha():
+            current_syllable += char
+        elif char.isdigit():
+            tone = char
+    
+    # Don't forget the last syllable
+    if current_syllable:
+        result.append(current_syllable + (tone or "5"))  # 5 = neutral tone
+    
+    return " ".join(result)
+
+
+def build_ssml(text: str, voice_id: str, pinyin: Optional[str] = None) -> str:
+    """
+    Build SSML with phoneme hints if pinyin is provided.
+    """
+    # If we have pinyin, use phoneme tags
+    if pinyin:
+        sapi_pinyin = pinyin_to_sapi(pinyin)
+        content = f'<phoneme alphabet="sapi" ph="{sapi_pinyin}">{text}</phoneme>'
+    else:
+        content = text
+    
+    ssml = f'''<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" 
+           xmlns:mstts="https://www.w3.org/2001/mstts" xml:lang="zh-CN">
+    <voice name="{voice_id}">
+        {content}
+    </voice>
+</speak>'''
+    
+    return ssml
 
 
 # ═══════════════════════════════════════════════════════════
@@ -140,10 +213,12 @@ class HealthResponse(BaseModel):
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
     """Health check endpoint"""
+    config = get_speech_config()
     return HealthResponse(
         status="ok",
-        configured=bool(get_api_key()),
-        model=MODEL,
+        configured=config is not None,
+        provider="Azure Speech Services",
+        region=os.getenv("AZURE_SPEECH_REGION", "germanywestcentral"),
         voiceCount=len(VOICES),
     )
 
@@ -167,14 +242,15 @@ async def get_voices():
 @app.post("/synthesize", response_model=SynthesizeResponse)
 async def synthesize(request: SynthesizeRequest):
     """
-    Synthesize speech from Chinese text using HTTP API.
+    Synthesize speech from Chinese text.
     
-    For single/double character words, you can provide pinyin hint
-    to ensure correct pronunciation.
+    For accurate pronunciation, provide pinyin with tone:
+    - Tone marks: "xiè", "nǐ hǎo"
+    - Tone numbers: "xie4", "ni3 hao3"
     """
-    api_key = get_api_key()
-    if not api_key:
-        raise HTTPException(status_code=500, detail="DashScope API key not configured")
+    config = get_speech_config()
+    if not config:
+        raise HTTPException(status_code=500, detail="Azure Speech not configured")
     
     if not request.text or not request.text.strip():
         raise HTTPException(status_code=400, detail="Text is required")
@@ -187,108 +263,58 @@ async def synthesize(request: SynthesizeRequest):
     voice_id = VOICES[voice_key]["id"]
     text = request.text.strip()
     
-    # For short words with pinyin, add context to help pronunciation
-    synthesis_text = text
-    if request.pinyin and len(text) <= 2:
-        # Format: "谢(xiè)" - helps model with correct tone
-        synthesis_text = f"{text}({request.pinyin})"
+    # Build SSML
+    ssml = build_ssml(text, voice_id, request.pinyin)
+    used_phoneme = bool(request.pinyin)
+    
+    print(f"[TTS] Text: '{text}', Pinyin: '{request.pinyin}', Voice: {voice_key}")
+    print(f"[TTS] SSML: {ssml}")
     
     try:
         start_time = time.time()
         
-        # Use DashScope HTTP API - International Edition endpoint
-        api_url = os.getenv("DASHSCOPE_API_URL", "https://dashscope-intl.aliyuncs.com/api/v1/services/aigc/text2audio/text-synthesize")
+        # Create synthesizer (outputs to memory, not speakers)
+        synthesizer = speechsdk.SpeechSynthesizer(
+            speech_config=config, 
+            audio_config=None  # No audio output, we want the data
+        )
         
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                api_url,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                    "X-DashScope-Async": "disable",  # Synchronous mode
-                },
-                json={
-                    "model": MODEL,
-                    "input": {
-                        "text": synthesis_text,
-                    },
-                    "parameters": {
-                        "voice": voice_id,
-                        "format": "mp3",
-                        "sample_rate": 22050,
-                    },
-                },
-            )
+        # Synthesize
+        result = synthesizer.speak_ssml_async(ssml).get()
         
         end_time = time.time()
         latency_ms = int((end_time - start_time) * 1000)
         
-        if response.status_code != 200:
-            error_detail = response.text
-            print(f"[TTS] API Error: {response.status_code} - {error_detail}")
-            raise HTTPException(status_code=500, detail=f"DashScope API error: {error_detail}")
+        # Check result
+        if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
+            audio_data = result.audio_data
+            audio_base64 = base64.b64encode(audio_data).decode("utf-8")
+            
+            print(f"[TTS] Success! Latency: {latency_ms}ms, Audio size: {len(audio_data)} bytes")
+            
+            return SynthesizeResponse(
+                audioBase64=audio_base64,
+                format="mp3",
+                charactersUsed=len(text),
+                voice=voice_key,
+                latencyMs=latency_ms,
+                usedPhoneme=used_phoneme,
+            )
         
-        result = response.json()
-        print(f"[TTS] Response keys: {result.keys()}")
+        elif result.reason == speechsdk.ResultReason.Canceled:
+            cancellation = result.cancellation_details
+            error_msg = f"Synthesis canceled: {cancellation.reason}"
+            if cancellation.error_details:
+                error_msg += f" - {cancellation.error_details}"
+            print(f"[TTS] Error: {error_msg}")
+            raise HTTPException(status_code=500, detail=error_msg)
         
-        # Check for audio in response
-        if "output" in result and "audio" in result["output"]:
-            # Audio is returned as base64 in the response
-            audio_base64 = result["output"]["audio"]
-        elif "output" in result and "audio_url" in result["output"]:
-            # Audio is returned as URL - need to download
-            audio_url = result["output"]["audio_url"]
-            async with httpx.AsyncClient() as client:
-                audio_response = await client.get(audio_url)
-                audio_base64 = base64.b64encode(audio_response.content).decode("utf-8")
         else:
-            print(f"[TTS] Unexpected response format: {result}")
-            raise HTTPException(status_code=500, detail="Unexpected API response format")
+            raise HTTPException(status_code=500, detail=f"Unknown result: {result.reason}")
         
-        print(f"[TTS] Text: '{text}', Voice: {voice_key}, Latency: {latency_ms}ms")
-        
-        return SynthesizeResponse(
-            audioBase64=audio_base64,
-            format="mp3",
-            charactersUsed=len(text),
-            voice=voice_key,
-            latencyMs=latency_ms,
-        )
-        
-    except httpx.TimeoutException:
-        raise HTTPException(status_code=504, detail="Request timed out")
     except Exception as e:
-        print(f"[TTS] Error: {str(e)}")
+        print(f"[TTS] Exception: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Synthesis failed: {str(e)}")
-
-
-@app.post("/synthesize-batch")
-async def synthesize_batch(texts: list[str], voice: Optional[str] = DEFAULT_VOICE):
-    """
-    Synthesize multiple texts in batch.
-    Returns list of audio base64 strings.
-    """
-    api_key = get_api_key()
-    if not api_key:
-        raise HTTPException(status_code=500, detail="DashScope API key not configured")
-    
-    results = []
-    for text in texts:
-        try:
-            result = await synthesize(SynthesizeRequest(text=text, voice=voice))
-            results.append({
-                "text": text,
-                "audioBase64": result.audioBase64,
-                "success": True,
-            })
-        except Exception as e:
-            results.append({
-                "text": text,
-                "error": str(e),
-                "success": False,
-            })
-    
-    return {"results": results}
 
 
 # ═══════════════════════════════════════════════════════════
@@ -299,4 +325,3 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
-

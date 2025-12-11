@@ -1,18 +1,16 @@
 # HanziMaster TTS Service
 
-A lightweight microservice for Chinese text-to-speech using Alibaba's DashScope CosyVoice API.
+Azure-based Chinese text-to-speech with **SSML phoneme control** for accurate tone pronunciation.
 
-## Why This Exists
+## Why Azure?
 
-ElevenLabs struggles with single Chinese characters - it guesses tones incorrectly. CosyVoice is a Chinese-native TTS model that handles this much better.
+ElevenLabs guesses tones for single Chinese characters. Azure allows explicit phoneme control:
 
-## Features
+```xml
+<phoneme alphabet="sapi" ph="xie4">谢</phoneme>
+```
 
-- 🎤 **7 Chinese voices** including male/female options
-- 🎯 **Accurate tones** for single/double character words
-- ⚡ **Fast** - typical latency < 500ms
-- 💰 **Cheap** - ~10x cheaper than ElevenLabs
-- 📦 **MP3 output** - ready to use
+This guarantees correct pronunciation every time.
 
 ## API Endpoints
 
@@ -20,16 +18,16 @@ ElevenLabs struggles with single Chinese characters - it guesses tones incorrect
 Health check.
 
 ### `GET /voices`
-List available voices.
+List available Chinese voices.
 
 ### `POST /synthesize`
-Synthesize speech.
+Synthesize speech with optional pinyin for tone control.
 
 ```json
 {
-  "text": "谢谢",
-  "voice": "longxiaochun",
-  "pinyin": "xièxiè"  // optional hint
+  "text": "谢",
+  "voice": "xiaoxiao",
+  "pinyin": "xiè"
 }
 ```
 
@@ -38,60 +36,58 @@ Response:
 {
   "audioBase64": "...",
   "format": "mp3",
-  "charactersUsed": 2,
-  "voice": "longxiaochun",
-  "latencyMs": 350
+  "charactersUsed": 1,
+  "voice": "xiaoxiao",
+  "latencyMs": 350,
+  "usedPhoneme": true
 }
 ```
+
+## Pinyin Format
+
+Both formats are supported:
+- **Tone marks:** `xiè`, `nǐ hǎo`, `zhōngguó`
+- **Tone numbers:** `xie4`, `ni3 hao3`, `zhong1 guo2`
 
 ## Available Voices
 
 | Key | Name | Gender | Description |
 |-----|------|--------|-------------|
-| longxiaochun | Xiaochun | Female | Standard Mandarin, gentle |
-| longxiaobai | Xiaobai | Female | Young, energetic |
-| longlaotie | Laotie | Male | Mature |
-| longshu | Shu | Male | Professional narrator |
-| longshuo | Shuo | Male | Warm |
-| longjielidou | Jielidou | Female | Sweet |
-| longxiaoxia | Xiaoxia | Female | Teacher voice |
+| xiaoxiao | Xiaoxiao | Female | Young, natural and clear |
+| xiaoyi | Xiaoyi | Female | Warm voice |
+| yunxi | Yunxi | Male | Young male |
+| yunyang | Yunyang | Male | Professional narrator |
+| xiaomo | Xiaomo | Female | Gentle voice |
 
 ## Environment Variables
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `DASHSCOPE_API_KEY` | ✅ | API key from DashScope |
+| `AZURE_SPEECH_KEY` | ✅ | Azure Speech Services API key |
+| `AZURE_SPEECH_REGION` | ✅ | Azure region (e.g., `germanywestcentral`) |
 | `PORT` | ❌ | Port number (default: 8000) |
-
-## Local Development
-
-```bash
-# Install dependencies
-pip install -r requirements.txt
-
-# Set API key
-export DASHSCOPE_API_KEY=your-key
-
-# Run
-python main.py
-```
 
 ## Deploy to Sevalla
 
 1. Push to GitHub
 2. Create new app in Sevalla
-3. Connect to this repo
-4. Set `DASHSCOPE_API_KEY` in environment variables
-5. Deploy
+3. Set environment variables:
+   ```
+   AZURE_SPEECH_KEY=your-key
+   AZURE_SPEECH_REGION=germanywestcentral
+   ```
+4. Deploy
 
-## Getting a DashScope API Key
+## Local Development
 
-1. Go to [DashScope Console](https://dashscope.console.aliyun.com/)
-2. Sign up for Alibaba Cloud account
-3. Enable DashScope service
-4. Create API key
+```bash
+pip install -r requirements.txt
+export AZURE_SPEECH_KEY=your-key
+export AZURE_SPEECH_REGION=germanywestcentral
+python main.py
+```
 
 ## Cost
 
-CosyVoice pricing: ~$0.02 per 1000 characters (vs ElevenLabs ~$0.30)
-
+Azure Neural TTS: ~$16 per 1 million characters
+(~20x cheaper than ElevenLabs)
