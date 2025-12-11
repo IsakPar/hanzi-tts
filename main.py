@@ -172,14 +172,15 @@ def pinyin_to_sapi(pinyin: str) -> str:
 
 
 def build_ssml(text: str, voice_id: str, pinyin: Optional[str] = None) -> str:
-    """Build SSML with phoneme hints if pinyin is provided."""
-    if pinyin:
-        # For Azure Chinese TTS, use x-microsoft-pinyin alphabet
-        # Format: pinyin with tone numbers, e.g., "xie4" for 谢
-        sapi_pinyin = pinyin_to_sapi(pinyin)
-        content = f'<phoneme alphabet="x-microsoft-pinyin" ph="{sapi_pinyin}">{text}</phoneme>'
-    else:
-        content = text
+    """Build SSML for Azure TTS.
+    
+    Note: Azure Neural TTS already handles Chinese pronunciation very well,
+    so we don't use phoneme hints by default. The pinyin parameter is kept
+    for future use if needed for disambiguation.
+    """
+    # Azure Neural TTS handles Chinese pronunciation well without phoneme hints
+    # Phoneme hints were causing 400 errors with certain formats
+    content = text
     
     ssml = f'''<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="zh-CN">
     <voice name="{voice_id}">
@@ -247,9 +248,8 @@ async def synthesize(request: SynthesizeRequest):
     voice_id = VOICES[voice_key]["id"]
     text = request.text.strip()
     
-    # Build SSML
+    # Build SSML (pinyin hint is logged but not used for phonemes currently)
     ssml = build_ssml(text, voice_id, request.pinyin)
-    used_phoneme = bool(request.pinyin)
     
     print(f"[TTS] Text: '{text}', Pinyin: '{request.pinyin}', Voice: {voice_key}")
     
@@ -286,7 +286,7 @@ async def synthesize(request: SynthesizeRequest):
                 charactersUsed=len(text),
                 voice=voice_key,
                 latencyMs=latency_ms,
-                usedPhoneme=used_phoneme,
+                usedPhoneme=False,  # Phonemes disabled - Azure handles Chinese well
             )
         else:
             error_text = response.text
