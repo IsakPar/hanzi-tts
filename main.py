@@ -174,8 +174,10 @@ def pinyin_to_sapi(pinyin: str) -> str:
 def build_ssml(text: str, voice_id: str, pinyin: Optional[str] = None) -> str:
     """Build SSML with phoneme hints if pinyin is provided."""
     if pinyin:
+        # For Azure Chinese TTS, use x-microsoft-pinyin alphabet
+        # Format: pinyin with tone numbers, e.g., "xie4" for 谢
         sapi_pinyin = pinyin_to_sapi(pinyin)
-        content = f'<phoneme alphabet="sapi" ph="{sapi_pinyin}">{text}</phoneme>'
+        content = f'<phoneme alphabet="x-microsoft-pinyin" ph="{sapi_pinyin}">{text}</phoneme>'
     else:
         content = text
     
