@@ -2,7 +2,7 @@
 HanziMaster TTS Service
 
 Azure-based text-to-speech for Chinese words with SSML phoneme control.
-Guarantees correct tone pronunciation for single characters.
+Uses REST API instead of SDK for serverless compatibility.
 """
 
 import os
@@ -12,25 +12,17 @@ from typing import Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import azure.cognitiveservices.speech as speechsdk
+import httpx
 
 # ═══════════════════════════════════════════════════════════
 # CONFIGURATION
 # ═══════════════════════════════════════════════════════════
 
-def get_speech_config():
+def get_azure_config():
     """Get Azure Speech config from environment."""
     key = os.getenv("AZURE_SPEECH_KEY")
     region = os.getenv("AZURE_SPEECH_REGION", "germanywestcentral")
-    
-    if not key:
-        return None
-    
-    config = speechsdk.SpeechConfig(subscription=key, region=region)
-    config.set_speech_synthesis_output_format(
-        speechsdk.SpeechSynthesisOutputFormat.Audio16Khz32KBitRateMonoMp3
-    )
-    return config
+    return key, region
 
 # Available voices
 VOICES = {
@@ -79,8 +71,8 @@ DEFAULT_VOICE = "xiaoxiao"
 
 app = FastAPI(
     title="HanziMaster TTS Service",
-    description="Azure-based Chinese TTS with phoneme control",
-    version="2.0.0",
+    description="Azure-based Chinese TTS with phoneme control (REST API)",
+    version="2.1.0",
 )
 
 app.add_middleware(
@@ -99,7 +91,7 @@ class SynthesizeRequest(BaseModel):
     """Request to synthesize speech"""
     text: str
     voice: Optional[str] = DEFAULT_VOICE
-    pinyin: Optional[str] = None  # e.g., "xiè" or "xie4"
+    pinyin: Optional[str] = None
 
 
 class SynthesizeResponse(BaseModel):
@@ -139,11 +131,6 @@ class HealthResponse(BaseModel):
 def pinyin_to_sapi(pinyin: str) -> str:
     """
     Convert pinyin (with tone mark or number) to SAPI phoneme format.
-    
-    Examples:
-        "xiè" -> "xie4"
-        "xie4" -> "xie4"  
-        "nǐ hǎo" -> "ni3 hao3"
     """
     if not pinyin:
         return ""
@@ -156,7 +143,7 @@ def pinyin_to_sapi(pinyin: str) -> str:
         'ō': ('o', '1'), 'ó': ('o', '2'), 'ǒ': ('o', '3'), 'ò': ('o', '4'),
         'ū': ('u', '1'), 'ú': ('u', '2'), 'ǔ': ('u', '3'), 'ù': ('u', '4'),
         'ǖ': ('v', '1'), 'ǘ': ('v', '2'), 'ǚ': ('v', '3'), 'ǜ': ('v', '4'),
-        'ü': ('v', '5'),  # Neutral ü
+        'ü': ('v', '5'),
     }
     
     result = []
@@ -178,26 +165,21 @@ def pinyin_to_sapi(pinyin: str) -> str:
         elif char.isdigit():
             tone = char
     
-    # Don't forget the last syllable
     if current_syllable:
-        result.append(current_syllable + (tone or "5"))  # 5 = neutral tone
+        result.append(current_syllable + (tone or "5"))
     
     return " ".join(result)
 
 
 def build_ssml(text: str, voice_id: str, pinyin: Optional[str] = None) -> str:
-    """
-    Build SSML with phoneme hints if pinyin is provided.
-    """
-    # If we have pinyin, use phoneme tags
+    """Build SSML with phoneme hints if pinyin is provided."""
     if pinyin:
         sapi_pinyin = pinyin_to_sapi(pinyin)
         content = f'<phoneme alphabet="sapi" ph="{sapi_pinyin}">{text}</phoneme>'
     else:
         content = text
     
-    ssml = f'''<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" 
-           xmlns:mstts="https://www.w3.org/2001/mstts" xml:lang="zh-CN">
+    ssml = f'''<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="zh-CN">
     <voice name="{voice_id}">
         {content}
     </voice>
@@ -213,12 +195,12 @@ def build_ssml(text: str, voice_id: str, pinyin: Optional[str] = None) -> str:
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
     """Health check endpoint"""
-    config = get_speech_config()
+    key, region = get_azure_config()
     return HealthResponse(
         status="ok",
-        configured=config is not None,
-        provider="Azure Speech Services",
-        region=os.getenv("AZURE_SPEECH_REGION", "germanywestcentral"),
+        configured=bool(key),
+        provider="Azure Speech Services (REST)",
+        region=region,
         voiceCount=len(VOICES),
     )
 
@@ -242,15 +224,15 @@ async def get_voices():
 @app.post("/synthesize", response_model=SynthesizeResponse)
 async def synthesize(request: SynthesizeRequest):
     """
-    Synthesize speech from Chinese text.
+    Synthesize speech from Chinese text using Azure REST API.
     
     For accurate pronunciation, provide pinyin with tone:
     - Tone marks: "xiè", "nǐ hǎo"
     - Tone numbers: "xie4", "ni3 hao3"
     """
-    config = get_speech_config()
-    if not config:
-        raise HTTPException(status_code=500, detail="Azure Speech not configured")
+    key, region = get_azure_config()
+    if not key:
+        raise HTTPException(status_code=500, detail="Azure Speech key not configured")
     
     if not request.text or not request.text.strip():
         raise HTTPException(status_code=400, detail="Text is required")
@@ -268,26 +250,30 @@ async def synthesize(request: SynthesizeRequest):
     used_phoneme = bool(request.pinyin)
     
     print(f"[TTS] Text: '{text}', Pinyin: '{request.pinyin}', Voice: {voice_key}")
-    print(f"[TTS] SSML: {ssml}")
     
     try:
         start_time = time.time()
         
-        # Create synthesizer (outputs to memory, not speakers)
-        synthesizer = speechsdk.SpeechSynthesizer(
-            speech_config=config, 
-            audio_config=None  # No audio output, we want the data
-        )
+        # Azure TTS REST endpoint
+        endpoint = f"https://{region}.tts.speech.microsoft.com/cognitiveservices/v1"
         
-        # Synthesize
-        result = synthesizer.speak_ssml_async(ssml).get()
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                endpoint,
+                headers={
+                    "Ocp-Apim-Subscription-Key": key,
+                    "Content-Type": "application/ssml+xml",
+                    "X-Microsoft-OutputFormat": "audio-16khz-128kbitrate-mono-mp3",
+                    "User-Agent": "HanziMasterTTS",
+                },
+                content=ssml.encode("utf-8"),
+            )
         
         end_time = time.time()
         latency_ms = int((end_time - start_time) * 1000)
         
-        # Check result
-        if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
-            audio_data = result.audio_data
+        if response.status_code == 200:
+            audio_data = response.content
             audio_base64 = base64.b64encode(audio_data).decode("utf-8")
             
             print(f"[TTS] Success! Latency: {latency_ms}ms, Audio size: {len(audio_data)} bytes")
@@ -300,18 +286,16 @@ async def synthesize(request: SynthesizeRequest):
                 latencyMs=latency_ms,
                 usedPhoneme=used_phoneme,
             )
-        
-        elif result.reason == speechsdk.ResultReason.Canceled:
-            cancellation = result.cancellation_details
-            error_msg = f"Synthesis canceled: {cancellation.reason}"
-            if cancellation.error_details:
-                error_msg += f" - {cancellation.error_details}"
-            print(f"[TTS] Error: {error_msg}")
-            raise HTTPException(status_code=500, detail=error_msg)
-        
         else:
-            raise HTTPException(status_code=500, detail=f"Unknown result: {result.reason}")
+            error_text = response.text
+            print(f"[TTS] Azure error {response.status_code}: {error_text}")
+            raise HTTPException(
+                status_code=500, 
+                detail=f"Azure TTS error ({response.status_code}): {error_text}"
+            )
         
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="Request timed out")
     except Exception as e:
         print(f"[TTS] Exception: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Synthesis failed: {str(e)}")
