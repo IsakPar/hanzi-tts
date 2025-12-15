@@ -3,16 +3,40 @@ HanziMaster TTS Service
 
 Azure-based text-to-speech for Chinese words with SSML phoneme control.
 Uses REST API instead of SDK for serverless compatibility.
+
+Also provides MFCC extraction for speech comparison in the mobile app.
 """
 
 import os
+import io
 import base64
 import time
-from typing import Optional
+from typing import Optional, List
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import httpx
+import numpy as np
+
+# MFCC extraction imports (lazy loaded for faster startup)
+librosa = None
+sf = None
+
+def get_librosa():
+    """Lazy load librosa to speed up cold starts."""
+    global librosa
+    if librosa is None:
+        import librosa as _librosa
+        librosa = _librosa
+    return librosa
+
+def get_soundfile():
+    """Lazy load soundfile."""
+    global sf
+    if sf is None:
+        import soundfile as _sf
+        sf = _sf
+    return sf
 
 # ═══════════════════════════════════════════════════════════
 # CONFIGURATION
@@ -122,6 +146,25 @@ class HealthResponse(BaseModel):
     provider: str
     region: str
     voiceCount: int
+
+
+# ═══════════════════════════════════════════════════════════
+# MFCC EXTRACTION MODELS
+# ═══════════════════════════════════════════════════════════
+
+class MFCCRequest(BaseModel):
+    """Request to extract MFCC features from audio"""
+    audioBase64: str  # Base64 encoded MP3/WAV audio
+    
+class MFCCResponse(BaseModel):
+    """Response with extracted MFCC features"""
+    coefficients: List[List[float]]  # [numFrames][numCoeffs]
+    sampleRate: int
+    hopMs: int
+    numCoeffs: int
+    durationMs: float
+    numFrames: int
+    latencyMs: int
 
 
 # ═══════════════════════════════════════════════════════════
@@ -301,6 +344,91 @@ async def synthesize(request: SynthesizeRequest):
     except Exception as e:
         print(f"[TTS] Exception: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Synthesis failed: {str(e)}")
+
+
+# ═══════════════════════════════════════════════════════════
+# MFCC EXTRACTION ENDPOINT
+# ═══════════════════════════════════════════════════════════
+
+@app.post("/extract-mfcc", response_model=MFCCResponse)
+async def extract_mfcc(request: MFCCRequest):
+    """
+    Extract MFCC (Mel-frequency Cepstral Coefficients) from audio.
+    
+    Used for speech comparison in the mobile app to detect if the user
+    said the correct words vs gibberish.
+    
+    Input: Base64 encoded MP3 audio
+    Output: MFCC feature matrix for DTW comparison
+    """
+    start_time = time.time()
+    
+    if not request.audioBase64:
+        raise HTTPException(status_code=400, detail="audioBase64 is required")
+    
+    try:
+        # Decode base64 to bytes
+        audio_bytes = base64.b64decode(request.audioBase64)
+        print(f"[MFCC] Received {len(audio_bytes)} bytes of audio")
+        
+        # Load audio using librosa (handles MP3, WAV, etc.)
+        lib = get_librosa()
+        
+        # Load audio from bytes
+        audio_buffer = io.BytesIO(audio_bytes)
+        
+        # Use soundfile to read, librosa to process
+        sf = get_soundfile()
+        samples, original_sr = sf.read(audio_buffer)
+        
+        # Convert to mono if stereo
+        if len(samples.shape) > 1:
+            samples = samples.mean(axis=1)
+        
+        # Resample to 16kHz (standard for speech)
+        target_sr = 16000
+        if original_sr != target_sr:
+            samples = lib.resample(samples, orig_sr=original_sr, target_sr=target_sr)
+        
+        print(f"[MFCC] Audio: {len(samples)/target_sr:.2f}s, {target_sr}Hz")
+        
+        # Extract MFCC features
+        # Settings optimized for Chinese speech comparison
+        n_mfcc = 13  # Number of MFCC coefficients
+        hop_length = 160  # 10ms at 16kHz
+        n_fft = 512  # ~32ms window
+        
+        mfcc = lib.feature.mfcc(
+            y=samples.astype(np.float32),
+            sr=target_sr,
+            n_mfcc=n_mfcc,
+            hop_length=hop_length,
+            n_fft=n_fft,
+        )
+        
+        # Transpose to [numFrames, numCoeffs] and convert to list
+        mfcc_transposed = mfcc.T.tolist()
+        num_frames = len(mfcc_transposed)
+        duration_ms = (len(samples) / target_sr) * 1000
+        
+        end_time = time.time()
+        latency_ms = int((end_time - start_time) * 1000)
+        
+        print(f"[MFCC] Extracted {num_frames} frames in {latency_ms}ms")
+        
+        return MFCCResponse(
+            coefficients=mfcc_transposed,
+            sampleRate=target_sr,
+            hopMs=10,  # 160 samples at 16kHz = 10ms
+            numCoeffs=n_mfcc,
+            durationMs=duration_ms,
+            numFrames=num_frames,
+            latencyMs=latency_ms,
+        )
+        
+    except Exception as e:
+        print(f"[MFCC] Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"MFCC extraction failed: {str(e)}")
 
 
 # ═══════════════════════════════════════════════════════════
